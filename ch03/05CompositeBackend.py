@@ -15,6 +15,10 @@
 
 ⚠️ 关于 execute：它是唯一不按路径路由的操作（永远走 default 后端），
    所以想用混合路由 + 命令执行，default 必须是沙箱后端。本脚本不演示它（见 03）。
+
+⚠️ 关于 FilesystemBackend 的 grep：deepagents 0.7.14 里它 shell 出 ripgrep 时没给
+   subprocess.Popen 指定 encoding，管道按本机 locale 解码；在中文 Windows（cp936）上
+   搜含中文的文件会直接 UnicodeDecodeError。实验 3 因此改用全内存的 composite。
 """
 import os
 import shutil
@@ -27,6 +31,7 @@ from utility import get_model, ask, hr
 
 ROOT_DIR = "_composite_demo"        # 裸调演示里 default 后端落盘的地方
 NAMESPACE = ("local-user",)         # 共享 store 的命名空间（本地兜底值，见 04）
+SCRATCH_NS = ("scratch",)           # 内存版 composite 里 default 那份的命名空间
 PLAN_PATH = "/workspace/plan.md"    # 不匹配任何路由 -> default（StateBackend，临时）
 PREF_PATH = "/memories/prefs.txt"   # 匹配 /memories/ -> 路由到 StoreBackend（持久）
 TEMP_PATH = "/notes/temp.md"        # 裸调演示里的非路由路径 -> 磁盘
@@ -49,9 +54,9 @@ def state_files(out: dict) -> list[str]:
     """StateBackend 把路由到它的文件写在 state 的 files 键里。"""
     return sorted((out.get("files") or {}).keys())
 
-def store_keys() -> list[str]:
-    """共享 store 里真实躺着哪些 key —— 注意这里看到的是剥掉路由前缀之后的路径。"""
-    return sorted(item.key for item in store.search(NAMESPACE))
+def store_keys(namespace: tuple[str, ...] = NAMESPACE) -> list[str]:
+    """store 里真实躺着哪些 key —— 注意这里看到的是剥掉路由前缀之后的路径。"""
+    return sorted(item.key for item in store.search(namespace))
 
 def disk_files(sub: str = "") -> list[str]:
     """_composite_demo 下真实的磁盘文件。"""
@@ -129,12 +134,27 @@ print("      跟 04 里清一色 StoreBackend 时「连 files 键都没有」正
 
 # 实验 3
 hr("实验 3：glob / grep 是怎么跨后端聚合的？（纯后端调用，不花 LLM）")
+# ⚠️ 这里故意换成「两份都是 store」的 composite。原因是一个库级坑：
+#    FilesystemBackend.grep 会 shell 出 ripgrep，而 deepagents 0.7.14 里那条
+#    subprocess.Popen(..., text=True) 没写 encoding，管道就按本机 locale 代码页解码
+#    （中文 Windows = cp936），ripgrep 吐的却是 UTF-8 —— 只要匹配到的行里有中文，
+#    就 UnicodeDecodeError: 'gbk' codec can't decode byte ...。
+#    换掉 default 之后全程不碰 ripgrep，任何 locale 下输出都一致。
+#    （glob 不受影响，它是纯 Python 实现；只有 grep 会 shell 出去。）
+mem = CompositeBackend(
+    default=StoreBackend(namespace=lambda rt: SCRATCH_NS, store=store),                 # 临时那份
+    routes={"/memories/": StoreBackend(namespace=lambda rt: NAMESPACE, store=store)},   # 持久那份
+)
+mem.write(TEMP_PATH, NOTE_BODY)
+mem.write(MEMO_PATH, NOTE_BODY)
+print(f"  两份落点                    : {store_keys(SCRATCH_NS)} / {store_keys(NAMESPACE)}")
 for pattern in ("*.md", "/*.md", "/notes/*.md", "/memories/*.md"):
-    print(f"  glob({pattern!r:<16}): {[m['path'] for m in bare.glob(pattern).matches]}")
-print(f"  grep('2026', path='/')        : {[m['path'] for m in bare.grep('2026', path='/').matches]}")
-print(f"  grep('2026', path='/memories/'): {[m['path'] for m in bare.grep('2026', path='/memories/').matches]}")
+    print(f"  glob({pattern!r:<16}): {[m['path'] for m in mem.glob(pattern).matches]}")
+print(f"  grep('2026', path='/')        : {[m['path'] for m in mem.grep('2026', path='/').matches]}")
+print(f"  grep('2026', path='/memories/'): {[m['path'] for m in mem.grep('2026', path='/memories/').matches]}")
 print("  => 期望: 不以 / 开头的模式会下发到每个路由、结果各自带回前缀，所以 '*.md' 两边都搜得到；")
 print("     以 / 开头的模式锚定在根，没指向某个路由时直接跳过它，所以 '/*.md' 一个都搜不到")
+print("     （顺带：default 和路由各用各的 namespace，所以两边互不干扰 —— 对照实验 4）")
 
 # 实验 4
 hr("实验 4：前缀的边界与撞车（纯后端调用，不花 LLM）")
